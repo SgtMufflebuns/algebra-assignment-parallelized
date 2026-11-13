@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <algebra/finite_fields/finite_fields.hpp>
 #include <algebra/matrices/matrices.hpp>
+#include <mpi.h>
 
 namespace {
 
@@ -56,6 +57,21 @@ void populate(Matrix& a, Matrix& b) {
             b(i, j) = next_element(generator);
         }
     }
+}
+
+//Function name could possibly change if we introduce PLU Decomposition. 
+Matrix cyclicDecomposition(Matrix matrix, int rank, int size){
+    //Implement cyclic decomposition using rank
+
+    //Here is where we will use the information of rank and size to help compute determinant
+
+    //const auto matrixBlockSize = dimension / (size - 1); This does not work if processes do not neatly match up with  
+
+    if(rank > 0){
+        //Do something here
+    }
+
+    return matrix;
 }
 
 Element determinant(Matrix matrix) {
@@ -129,6 +145,17 @@ int main() {
         const Matrix c = a.multiply(b);
         std::cout << "Product seconds " << seconds(start) << '\n';
 
+        //Initialize MPI without argc and argv since we are not accepting any arguments.
+        MPI_Init(nullptr, nullptr);  
+
+        //Determine the rank and the size of the specific process.
+        int rank, size;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+        cyclicDecomposition(A, rank, size);
+        cyclicDecomposition(A, rank, size);
+
         std::cout << "Computing det(A)\n" << std::flush;
         start = Clock::now();
         const auto det_a = determinant(a);
@@ -143,6 +170,8 @@ int main() {
         start = Clock::now();
         const auto det_c = determinant(c);
         print_determinant("det(C)", det_c, seconds(start));
+
+        MPI_Finalize();
 
         const auto expected = det_a.multiply(det_b);
         const bool verified = det_c == expected;
