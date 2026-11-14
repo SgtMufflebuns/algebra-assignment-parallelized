@@ -121,6 +121,39 @@ void print_determinant(const char* name, const Element& value, double elapsed) {
     std::cout << "]\nSeconds " << elapsed << '\n' << std::flush;
 }
 
+// the three independent determinants det(A), det(B), and det(C) 
+constexpr int task_count = 3; // det(A), det(B), det(C)
+constexpr const char* task_names[task_count] = {"det(A)", "det(B)", "det(C)"};
+
+// which rank computes a task. Fewer than 3 ranks the tasks wrap around
+// so a single rank does all three
+int owner_of(int task, int size){
+    return task % size; // simplest way to assign work to ranks
+}
+
+// tags label messages so a result can't be mistaken for a timing
+int result_tag(int task) {
+    return task;
+}
+
+int time_tag(int task){
+    return task_count + task;
+}
+
+std::uint16_t encode(const Element& value){
+    std::uint32_t index = 0;
+    std::uint32_t place = 1;
+    for (std::size_t degree = 0; degree < Field::extension_degree; ++degree) {
+        index += value.coefficient(degree).representative() * place;
+        place *= Field::characteristic;
+    }
+    return static_cast<std::uint16_t>(index);
+}
+
+Element decode(std::uint16_t index){
+    return Element::from_index(index); // library already does the reverse
+}
+
 }
 
 int main() {
@@ -173,46 +206,66 @@ int main() {
 
         cyclicDecomposition(a, rank, size);
         cyclicDecomposition(b, rank, size);
+        
 
-        if (root) {
-            std::cout << "Computing det(A)\n" << std::flush;
-        }
-        start = Clock::now();
-        const auto det_a = determinant(a);
-        if (root) {
-            print_determinant("det(A)", det_a, seconds(start));
-        }
+        // making each rank compute only its own tasks
+        const Matrix* inputs[task_count] = {&a, &b, &c};
+        Element results[task_count];
+        double times[task_count] = {};
 
-        if (root) {
-            std::cout << "Computing det(B)\n" << std::flush;
-        }
-        start = Clock::now();
-        const auto det_b = determinant(b);
-        if (root) {
-            print_determinant("det(B)", det_b, seconds(start));
-        }
 
-        if (root) {
-            std::cout << "Computing det(C)\n" << std::flush;
-        }
-        start = Clock::now();
-        const auto det_c = determinant(c);
-        if (root) {
-            print_determinant("det(C)", det_c, seconds(start));
-        }
+
+        for (int task = 0; task < task_count; ++task){
+            if (owner_of(task, size) != rank){
+                continue;
+            }
+        
+            start = Clock::now();
+            results[task] = determinant(*inputs[task]);
+            times[task] = seconds(start);
+
+            if (!root){
+                const std::uint16_t code = encode(results[task]);
+                MPI_Send(&code, 1, MPI_UINT16_T, 0, result_tag(task), MPI_COMM_WORLD);
+                MPI_Send(&times[task], 1, MPI_DOUBLE, 0, time_tag(task), MPI_COMM_WORLD);
+            }
+    }
 
         
 
-        const auto expected = det_a.multiply(det_b);
-        const bool verified = det_c == expected;
-        if (root) {
+        bool verified = true;
+        if (root){
+            for (int task = 0; task < task_count; ++task){
+                const int owner = owner_of(task, size);
+                if (owner == 0){
+                    continue;
+                }
+                std::uint16_t code = 0;
+                // receive the result into code
+                MPI_Recv(&code, 1, MPI_UINT16_T, owner, result_tag(task), MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                //receive the timing into times[task]
+                MPI_Recv(&times[task], 1, MPI_DOUBLE, owner, time_tag(task), MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                results[task] = decode(code); // convert code back into an element and store into results
+                
+            }
+
+            // print the results
+            for (int task = 0; task < task_count; ++task){
+                std::cout << task_names[task] << " computed on rank " << owner_of(task, size) << '\n';
+                print_determinant(task_names[task], results[task], times[task]);
+            }
+
+            const Element expected = results[0].multiply(results[1]);
+            verified = (results[2] == expected);
             std::cout << "det(A) * det(B) = " << expected << '\n'
                       << "Identity verified " << std::boolalpha << verified << '\n'
                       << "Total seconds " << seconds(total_start) << '\n';
         }
 
         MPI_Finalize(); // should be the last MPI call a rank makes
+
         return verified ? 0 : 1;
+        
     } catch (const std::exception& error) {
         std::cerr << "rank " << rank << ": " << error.what() << '\n';
         MPI_Abort(MPI_COMM_WORLD, 1);
