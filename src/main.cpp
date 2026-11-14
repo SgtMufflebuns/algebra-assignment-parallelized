@@ -124,63 +124,98 @@ void print_determinant(const char* name, const Element& value, double elapsed) {
 }
 
 int main() {
+
+    // Initialize MPI environment
+    //Initialize MPI without argc and argv since we are not accepting any arguments.
+    MPI_Init(nullptr, nullptr);  
+
+    //Determine the rank and the size of the specific process.
+    int rank, size; // every rank needs to know who it is before deciding what work to do
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // root is used to determine if the current process is the main process responsible for output and coordination
+    const bool root = rank == 0;
+
+        
     try {
         const auto total_start = Clock::now();
         Field::initialize();
-        std::cout << std::fixed << std::setprecision(6)
-                  << "Matrix dimension " << dimension << '\n'
-                  << "Seed " << seed << '\n'
-                  << "Field order " << Field::cardinality() << '\n'
-                  << "Modulus " << Field::modulus() << '\n';
+        if (root) {
+            std::cout << std::fixed << std::setprecision(6)
+                      << "Matrix dimension " << dimension << '\n'
+                      << "Seed " << seed << '\n'
+                      << "Field order " << Field::cardinality() << '\n'
+                      << "Modulus " << Field::modulus() << '\n';
+        }
 
-        std::cout << "Generating A and B\n" << std::flush;
+        if (root) {
+            std::cout << "Generating A and B\n" << std::flush;
+        }
         auto start = Clock::now();
         Matrix a;
         Matrix b;
         populate(a, b);
-        std::cout << "Generation seconds " << seconds(start) << '\n';
+        if (root) {
+            std::cout << "Generation seconds " << seconds(start) << '\n';
+        }
 
-        std::cout << "Computing C = A * B\n" << std::flush;
+        if (root) {
+            std::cout << "Computing C = A * B\n" << std::flush;
+        }
         start = Clock::now();
         const Matrix c = a.multiply(b);
-        std::cout << "Product seconds " << seconds(start) << '\n';
+        if (root) {
+            std::cout << "Product seconds " << seconds(start) << '\n';
+        }
 
-        //Initialize MPI without argc and argv since we are not accepting any arguments.
-        MPI_Init(nullptr, nullptr);  
 
-        //Determine the rank and the size of the specific process.
-        int rank, size;
-        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-        MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-        cyclicDecomposition(A, rank, size);
-        cyclicDecomposition(A, rank, size);
+        cyclicDecomposition(a, rank, size);
+        cyclicDecomposition(b, rank, size);
 
-        std::cout << "Computing det(A)\n" << std::flush;
+        if (root) {
+            std::cout << "Computing det(A)\n" << std::flush;
+        }
         start = Clock::now();
         const auto det_a = determinant(a);
-        print_determinant("det(A)", det_a, seconds(start));
+        if (root) {
+            print_determinant("det(A)", det_a, seconds(start));
+        }
 
-        std::cout << "Computing det(B)\n" << std::flush;
+        if (root) {
+            std::cout << "Computing det(B)\n" << std::flush;
+        }
         start = Clock::now();
         const auto det_b = determinant(b);
-        print_determinant("det(B)", det_b, seconds(start));
+        if (root) {
+            print_determinant("det(B)", det_b, seconds(start));
+        }
 
-        std::cout << "Computing det(C)\n" << std::flush;
+        if (root) {
+            std::cout << "Computing det(C)\n" << std::flush;
+        }
         start = Clock::now();
         const auto det_c = determinant(c);
-        print_determinant("det(C)", det_c, seconds(start));
+        if (root) {
+            print_determinant("det(C)", det_c, seconds(start));
+        }
 
-        MPI_Finalize();
+        
 
         const auto expected = det_a.multiply(det_b);
         const bool verified = det_c == expected;
-        std::cout << "det(A) * det(B) = " << expected << '\n'
-                  << "Identity verified " << std::boolalpha << verified << '\n'
-                  << "Total seconds " << seconds(total_start) << '\n';
+        if (root) {
+            std::cout << "det(A) * det(B) = " << expected << '\n'
+                      << "Identity verified " << std::boolalpha << verified << '\n'
+                      << "Total seconds " << seconds(total_start) << '\n';
+        }
+
+        MPI_Finalize(); // should be the last MPI call a rank makes
         return verified ? 0 : 1;
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
+        std::cerr << "rank " << rank << ": " << error.what() << '\n';
+        MPI_Abort(MPI_COMM_WORLD, 1);
         return 1;
     }
 }
