@@ -214,6 +214,8 @@ int main() {
         double times[task_count] = {};
 
 
+        MPI_Barrier(MPI_COMM_WORLD); // wait until every rank is ready
+        const double phase_start = MPI_Wtime(); // start the clock
 
         for (int task = 0; task < task_count; ++task){
             if (owner_of(task, size) != rank){
@@ -248,7 +250,11 @@ int main() {
                 results[task] = decode(code); // convert code back into an element and store into results
                 
             }
+        }
+        MPI_Barrier(MPI_COMM_WORLD); // wait until every rank has finished
+        const double phase_end = MPI_Wtime(); // stop the clock
 
+        if (root){
             // print the results
             for (int task = 0; task < task_count; ++task){
                 std::cout << task_names[task] << " computed on rank " << owner_of(task, size) << '\n';
@@ -259,13 +265,16 @@ int main() {
             verified = (results[2] == expected);
             std::cout << "det(A) * det(B) = " << expected << '\n'
                       << "Identity verified " << std::boolalpha << verified << '\n'
-                      << "Total seconds " << seconds(total_start) << '\n';
+                      << "Total seconds " << seconds(total_start) << '\n'
+                      << "Determinant seconds: " << (phase_end - phase_start) << " seconds\n"; 
+        
         }
+    
 
         MPI_Finalize(); // should be the last MPI call a rank makes
 
         return verified ? 0 : 1;
-        
+
     } catch (const std::exception& error) {
         std::cerr << "rank " << rank << ": " << error.what() << '\n';
         MPI_Abort(MPI_COMM_WORLD, 1);
