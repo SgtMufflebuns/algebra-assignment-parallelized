@@ -65,7 +65,42 @@ Matrix cyclicDecomposition(Matrix matrix, int rank, int size){
 
     //Here is where we will use the information of rank and size to help compute determinant
 
-    //const auto matrixBlockSize = dimension / (size - 1); This does not work if processes do not neatly match up with  
+    MPI_Comm cart_comm; 
+
+    //Arrange the processes in a Pr x Pc grid.
+    const int dimSize = 2;
+    int dims[dimSize]{0, 0};
+    int periods[dimSize]{0, 0};
+    int coords[dimSize]{};
+
+    MPI_Dims_create(size, dimSize, dims);
+
+    int processRows = dims[0];
+    int processCols = dims[1];
+    int reorder = 0; 
+
+    MPI_Cart_create(MPI_COMM_WORLD, dimSize, dims, periods, reorder, &cart_comm);
+    MPI_Cart_coords(cart_comm, rank, dimSize, coords)
+
+    const auto blockSize = 4; //Number of elements in each block MB or NB
+    
+    for(std::size_t k = 0; k < dimension; ++k){
+        int row = k / dimension;
+        int col = k % dimension;
+
+        int blockRow = row / blockSize; //lm 
+        int blockCol = col / blockSize; //ln
+
+        int processRowCoordinate = blockRow % processRows;
+        int processColCoordinate = blockCol % processCols;
+
+        if(processRowCoordinate == coords[0] && processColCoordinate == coords[1]){
+            //Here is where we will distribute the blocks to each process.
+            //Append the block to the matrix?
+
+        }
+
+    }
 
     if(rank > 0){
         //Do something here
