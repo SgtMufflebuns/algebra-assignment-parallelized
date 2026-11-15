@@ -60,7 +60,7 @@ void populate(Matrix& a, Matrix& b) {
 }
 
 //Function name could possibly change if we introduce PLU Decomposition. 
-Matrix cyclicDecomposition(Matrix matrix, int rank, int size){
+Matrix cyclicDecomposition(Matrix matrix, int size){
     //Implement cyclic decomposition using rank
 
     //Here is where we will use the information of rank and size to help compute determinant
@@ -80,11 +80,76 @@ Matrix cyclicDecomposition(Matrix matrix, int rank, int size){
     int reorder = 0; 
 
     MPI_Cart_create(MPI_COMM_WORLD, dimSize, dims, periods, reorder, &cart_comm);
-    MPI_Cart_coords(cart_comm, rank, dimSize, coords)
+
+    int cartRank;
+    MPI_Comm_rank(cart_comm, &cartRank);
+    MPI_Cart_coords(cart_comm, cartRank, dimSize, coords);
 
     const auto blockSize = 4; //Number of elements in each block MB or NB
     
-    for(std::size_t k = 0; k < dimension; ++k){
+    //We need to allocate memory for each local chunk 
+    int numBlocks = (dimension + blockSize - 1) / blockSize; 
+    int localRows = 0;
+    int localCols = 0;
+
+    //Get the number of rows and cols each chunk requires. 
+    //Combines cyclical and block distribution.
+    for(std::size_t i = 0; i < dimension; ++i){
+        int blockRow = i / blockSize; 
+
+        if(blockRow % processRows == coords[0]){
+            ++localRows;
+        }
+    }
+
+    for(std::size_t j = 0; j < dimension; ++j){
+        int blockCol = j / blockSize;
+
+        if(blockCol % processCols == coords[1]){
+            ++localCols;
+        }
+    }
+
+    std::vector<Element> processMatrix(localRows * localCols); 
+
+    //Processing block by block
+    for(std::size_t block = 0; block < numBlocks * numBlocks; ++block){
+        
+        int blockRow = block / numBlocks;
+        int blockCol = block % numBlocks; 
+        
+        //We can do this cause of MPI_Cart calcs earlier
+        int processRowCoordinate = blockRow % processRows;
+        int processColCoordinate = blockCol % processCols; 
+
+        if(processRowCoordinate == coords[0] && processColCoordinate == coords[1]){
+            
+            //What row and column in terms of blocks is this block located. 
+            int localBlockRow = blockRow / processRows;
+            int localBlockCol = blockCol / processCols;
+
+            //Accounts for uneven blocks
+            int rowEnd = std::min((blockRow + 1) * blockSize, dimension);
+            int colEnd = std::min((blockCol + 1) * blockSize, dimension);
+
+            //Iterate over each element in the block
+            for(std::size_t globalRow = blockRow * blockSize; globalRow < rowEnd; ++globalRow){
+                for(std::size_t globalCol = blockCol * blockSize; globalCol < colEnd; ++globalCol){
+                    std::size_t localRow = localBlockRow * blockSize + globalRow % blockSize;
+                    std::size_t localCol = localBlockCol * blockSize + globalCol % blockSize; 
+
+                    processMatrix[localRow * localCols + localCol] = matrix(globalRow, globalCol);
+                }
+            }
+
+        }
+        
+    }
+
+    //This is for processing element by element
+   /*  for(std::size_t k = 0; k < dimension * dimension; ++k){
+
+        //Convert k into row and column
         int row = k / dimension;
         int col = k % dimension;
 
@@ -100,7 +165,7 @@ Matrix cyclicDecomposition(Matrix matrix, int rank, int size){
 
         }
 
-    }
+    } */
 
     if(rank > 0){
         //Do something here
@@ -188,8 +253,8 @@ int main() {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-        cyclicDecomposition(A, rank, size);
-        cyclicDecomposition(A, rank, size);
+        cyclicDecomposition(A, size);
+        cyclicDecomposition(A, size);
 
         std::cout << "Computing det(A)\n" << std::flush;
         start = Clock::now();
