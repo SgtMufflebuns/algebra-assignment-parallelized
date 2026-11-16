@@ -6,5 +6,7 @@ if(NOT ALGEBRA_ASSIGNMENT_SIZE MATCHES "^[1-9][0-9]*$")
     message(FATAL_ERROR "The matrix dimension must be a positive integer")
 endif()
 
+find_package(MPI REQUIRED COMPONENTS CXX)
+
 include(cmake/Dependencies.cmake)
 add_subdirectory(src)

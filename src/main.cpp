@@ -1,3 +1,4 @@
+#include <mpi.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -6,6 +7,7 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+
 #include <algebra/finite_fields/finite_fields.hpp>
 #include <algebra/matrices/matrices.hpp>
 
@@ -58,100 +60,353 @@ void populate(Matrix& a, Matrix& b) {
     }
 }
 
-Element determinant(Matrix matrix) {
-    Element result = Element::one();
-    for (std::size_t k = 0; k < dimension; ++k) {
-        std::size_t pivot_row = k;
-        while (pivot_row < dimension && matrix(pivot_row, k).is_zero()) {
-            ++pivot_row;
+int calculateOwner(int globalColumn, int matrixSize, int numNodes)
+{
+    // calculate the owner of a specific column,
+    // in this instance, for the 1D column blocking
+
+    int baseBlockSize = matrixSize / numNodes;
+    int remainder = matrixSize % numNodes;
+    int blockStart = 0;
+
+    for (int node = 0; node < numNodes; ++node) 
+    {
+        int blockSize = baseBlockSize + (node < remainder ? 1 : 0);
+        if (globalColumn < blockStart + blockSize) 
+        {
+            return node;
         }
-        if (pivot_row == dimension) {
+        blockStart += blockSize;
+    }
+    return numNodes - 1;
+}
+
+void calculateBounds(int& start, int& end, int matrixSize, int numNodes, int node) {
+    // say you have a 10x10 matrix and 3 nodes
+    // the block size is 3, and the remainder is 1
+    // node 0 gets 4 columns (node 0 < remainder 1), 
+    // meanining that node 1 and 2 get 3 cols each
+
+    int baseBlockSize = matrixSize / numNodes;
+    int remainder = matrixSize % numNodes;
+    start = node * baseBlockSize + std::min(node, remainder);
+    end = start + baseBlockSize + (node < remainder ? 1 : 0);
+}
+
+template<class Element>
+void broadcastFiniteFieldElement(Element& element, int root, MPI_Comm commWorld) 
+{
+    // Definitely the trickiest part here; problem is that
+    // element can't cleanly be broadcast as a single MPI datatype.
+    // So we need to break it into its coefficients and broadcast each one.
+
+    // need this in order to extract the # of degrees
+    using Field = typename Element::parent_type;
+
+    // these are the actual values of the element
+    using Coefficient = typename Element::coefficient_type;
+    using Polynomial = typename Element::polynomial_type;
+
+    int rank;
+    MPI_Comm_rank(commWorld, &rank);
+
+    constexpr std::size_t numDegrees = Field::extension_degree;
+    
+    //create a buffer for the coefficients
+    //to be stored in for the network...
+    std::array<std::uint32_t, numDegrees> coefficientBuffer{};
+
+    if (rank == root) {
+        for (std::size_t i = 0; i < numDegrees; ++i) {
+            coefficientBuffer[i] = element.coefficient(i).representative();
+        }
+    }
+
+    //broadcast this buffer to all nodes...
+    MPI_Bcast(
+        coefficientBuffer.data(),
+        static_cast<int>(numDegrees),
+        MPI_UINT32_T,
+        root,
+        commWorld
+    );
+
+    //...and reconstruct the element using the buffer.
+    if (rank != root) 
+    {
+        // construct a temp polynomial to replace the new element. 
+        Polynomial tempPolynomial;
+        // since polynomials are dynamic, can increase size with no issue.
+        for (std::size_t i = 0; i < numDegrees; ++i) 
+        {
+            // i'th degree with value of the i'th coefficient in the buffer
+            tempPolynomial.set_coefficient(i, Coefficient::from_index(coefficientBuffer[i]));
+        }
+        element = Element::from_polynomial(tempPolynomial);
+    }
+}
+
+Element determinant(Matrix matrix, MPI_Comm commWorld) {
+
+    // we will be parallelizing this using 1D-column blocked;
+    // that is, evenly distributing the # of cols between
+    // each node using OpenMPI.
+    // this is inefficient (since early nodes will eventually idle), but
+    // this is done to demonstrate the naive approach. 
+
+    int rank, size;
+    MPI_Comm_rank(commWorld, &rank);
+    MPI_Comm_size(commWorld, &size);
+
+    int localStart, localEnd;
+    calculateBounds(localStart, localEnd, dimension, size, rank);
+
+    // with column-blocked distribution, each node will
+    // own a contiguous block of columns.
+
+    /* ex: 2 nodes, 4x4 matrix 
+
+        0 0 1 1
+        0 0 1 1
+        0 0 1 1
+        0 0 1 1
+    */
+
+    Element result = Element::one();
+    for (std::size_t activeColumn = 0; activeColumn < dimension; ++activeColumn) {
+        std::size_t pivot_row = -1;
+        std::size_t owner = calculateOwner(activeColumn, dimension, size);
+
+        // owner of the column handle the pivot row
+        if(rank == owner)
+        {
+            pivot_row = activeColumn;
+            while (pivot_row < dimension && matrix(pivot_row, activeColumn).is_zero()) 
+            {
+                ++pivot_row;
+            }
+        }
+
+        // broadcast the pivot row to all nodes
+        MPI_Bcast(&pivot_row, 1, MPI_UNSIGNED_LONG, owner, commWorld);
+
+        if (pivot_row == dimension) 
+        {
             return Element::zero();
         }
-        if (pivot_row != k) {
-            matrix.swap_rows(pivot_row, k);
+
+        if (pivot_row != activeColumn) 
+        {
+            matrix.swap_rows(pivot_row, activeColumn);
             result = result.negate();
         }
-        const Element pivot = matrix(k, k);
-        result = result.multiply(pivot);
+
+        // since this pivot can be stale on other columns,
+        // broadcast it from the owner (its accurate)
+        Element pivot = Element::zero();
         Element inverse = Element::one();
-        if (!pivot.is_one()) {
-            inverse = pivot.reciprocal();
+        int remainingRows = dimension - activeColumn - 1;
+
+        // need to also create a vector for the multipliers
+        // for the owner to track and distribute
+        std::vector<Element> multipliers(remainingRows, Element::zero());
+        
+        // the owner of the pivot column grabs the 
+        // true pivot value and calculates the multipliers
+        if (rank == owner) 
+        {
+            pivot = matrix(activeColumn, activeColumn);
+            if (!pivot.is_one()) 
+            {
+                inverse = pivot.reciprocal();
+            }
+
+            for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow) 
+            {
+                if (!matrix(targetRow, activeColumn).is_zero()) 
+                {
+                    multipliers[targetRow - activeColumn - 1] =
+                        matrix(targetRow, activeColumn).multiply(inverse);
+                }
+            }
         }
-        for (std::size_t i = k + 1; i < dimension; ++i) {
-            if (matrix(i, k).is_zero()) {
+
+        // now that the pivot & multipliers have been set, 
+        // need to broadcast it to all nodes by reconstructing
+        // each finite field element and rebuilding piecemeal
+        broadcastFiniteFieldElement(pivot, owner, commWorld);
+        for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow) 
+        {
+            broadcastFiniteFieldElement(multipliers[targetRow - activeColumn - 1], owner, commWorld);
+        }
+
+        result = result.multiply(pivot);
+
+        // finally, paralellization takes place; each node handles
+        // multiplying ONLY the columns assigned to them.
+        // this means each node only has to deal with 1/n of this work
+        // hopefully, this offsets the costs of MPI
+        for (std::size_t targetCol = localStart; targetCol < localEnd; ++targetCol) 
+        {
+            if (targetCol <= activeColumn) 
+            {
                 continue;
             }
-            const Element multiplier = matrix(i, k).multiply(inverse);
-            matrix(i, k) = Element::zero();
-            for (std::size_t j = k + 1; j < dimension; ++j) {
-                const Element correction = multiplier.multiply(matrix(k, j));
-                matrix(i, j) = matrix(i, j).add(correction.negate());
+
+            // remember that we're making an upper triangular matrix, 
+            // so we only need to worry about the elements above the diagonal
+            for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow) 
+            {
+                const Element multiplier = multipliers[targetRow - activeColumn - 1];
+
+                if (multipliers[targetRow - activeColumn - 1].is_zero()) 
+                {
+                    continue;
+                }
+
+                const Element correction = multiplier.multiply(matrix(activeColumn, targetCol));
+                matrix(targetRow, targetCol) = matrix(targetRow, targetCol).add(correction.negate());
             }
         }
+        
+        
     }
     return result;
 }
 
-void print_determinant(const char* name, const Element& value, double elapsed) {
-    std::cout << name << " = " << value << '\n';
-    std::cout << "Coefficients [";
-    for (std::size_t degree = 0; degree < Field::extension_degree; ++degree) {
+void print_determinant(const char* name, const Element& value, double elapsed, int rank) {
+    if(rank == 0)
+    {
+        std::cout << name << " = " << value << '\n';
+        std::cout << "Coefficients [";
+        for (std::size_t degree = 0; degree < Field::extension_degree; ++degree) {
         if (degree != 0) {
             std::cout << ", ";
         }
         std::cout << value.coefficient(degree);
     }
     std::cout << "]\nSeconds " << elapsed << '\n' << std::flush;
+    }
 }
 
 }
 
-int main() {
+double CalculateSlowestElapsedTime(double localElapsedTime, MPI_Comm commWorld) 
+{
+    double globalElapsedTime = 0.0f;
+    MPI_Allreduce(&localElapsedTime, &globalElapsedTime, 1, MPI_DOUBLE, MPI_MAX, commWorld);
+
+    return globalElapsedTime;
+}
+
+int main(int argc, char* argv[]) {
+    bool mpi_initialized = false;
     try {
-        const auto total_start = Clock::now();
-        Field::initialize();
-        std::cout << std::fixed << std::setprecision(6)
-                  << "Matrix dimension " << dimension << '\n'
-                  << "Seed " << seed << '\n'
-                  << "Field order " << Field::cardinality() << '\n'
-                  << "Modulus " << Field::modulus() << '\n';
+        if (MPI_Init(&argc, &argv) != MPI_SUCCESS) 
+        {
+            throw std::runtime_error("MPI_Init failed!");
+        }
+        mpi_initialized = true;
+        int rank, size;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-        std::cout << "Generating A and B\n" << std::flush;
-        auto start = Clock::now();
+        // everything's passed, can get to work
+
+        double total_start = MPI_Wtime();
+
+        char host[MPI_MAX_PROCESSOR_NAME] = {};
+        int length;
+        MPI_Get_processor_name(host, &length);
+
+        Field::initialize();
+
+        if (rank == 0) 
+        {
+            std::cout << std::fixed << std::setprecision(6)
+                      << "Matrix dimension " << dimension << '\n'
+                      << "Seed " << seed << '\n'
+                      << "Field order " << Field::cardinality() << '\n'
+                      << "Modulus " << Field::modulus() << '\n';
+
+            std::cout << "Generating A and B\n" << std::flush;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        double start = MPI_Wtime();
         Matrix a;
         Matrix b;
         populate(a, b);
-        std::cout << "Generation seconds " << seconds(start) << '\n';
+        double localElapsed = MPI_Wtime() - start;
+        double globalElapsed = CalculateSlowestElapsedTime(localElapsed, MPI_COMM_WORLD);
+        if (rank == 0) 
+        {
+            std::cout << "Generation seconds " << globalElapsed << '\n';
+            std::cout << "Computing C = A * B\n" << std::flush;
+        }
 
-        std::cout << "Computing C = A * B\n" << std::flush;
-        start = Clock::now();
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
         const Matrix c = a.multiply(b);
-        std::cout << "Product seconds " << seconds(start) << '\n';
+        localElapsed = MPI_Wtime() - start;
+        globalElapsed = CalculateSlowestElapsedTime(localElapsed, MPI_COMM_WORLD);
+        if (rank == 0) 
+        {
+            std::cout << "Product seconds " << globalElapsed << '\n';
+            std::cout << "Computing det(A)\n" << std::flush;
+        }
 
-        std::cout << "Computing det(A)\n" << std::flush;
-        start = Clock::now();
-        const auto det_a = determinant(a);
-        print_determinant("det(A)", det_a, seconds(start));
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
+        const auto det_a = determinant(a, MPI_COMM_WORLD);
+        localElapsed = MPI_Wtime() - start;
+        globalElapsed = CalculateSlowestElapsedTime(localElapsed, MPI_COMM_WORLD);
+        print_determinant("det(A)", det_a, globalElapsed, rank);
 
-        std::cout << "Computing det(B)\n" << std::flush;
-        start = Clock::now();
-        const auto det_b = determinant(b);
-        print_determinant("det(B)", det_b, seconds(start));
+        if (rank == 0) 
+        {
+            std::cout << "Computing det(B)\n" << std::flush;
+        }
 
-        std::cout << "Computing det(C)\n" << std::flush;
-        start = Clock::now();
-        const auto det_c = determinant(c);
-        print_determinant("det(C)", det_c, seconds(start));
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
+        const auto det_b = determinant(b, MPI_COMM_WORLD);
+        localElapsed = MPI_Wtime() - start;
+        globalElapsed = CalculateSlowestElapsedTime(localElapsed, MPI_COMM_WORLD);
+        print_determinant("det(B)", det_b, globalElapsed, rank);
+
+        if (rank == 0) 
+        {
+            std::cout << "Computing det(C)\n" << std::flush;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+        start = MPI_Wtime();
+        const auto det_c = determinant(c, MPI_COMM_WORLD);
+        localElapsed = MPI_Wtime() - start;
+        globalElapsed = CalculateSlowestElapsedTime(localElapsed, MPI_COMM_WORLD);
+        print_determinant("det(C)", det_c, globalElapsed, rank);
 
         const auto expected = det_a.multiply(det_b);
         const bool verified = det_c == expected;
-        std::cout << "det(A) * det(B) = " << expected << '\n'
-                  << "Identity verified " << std::boolalpha << verified << '\n'
-                  << "Total seconds " << seconds(total_start) << '\n';
+        if (rank == 0) {
+            std::cout << "det(A) * det(B) = " << expected << '\n'
+                      << "Identity verified " << std::boolalpha << verified << '\n'
+                      << "Total seconds " << MPI_Wtime() - total_start << '\n';
+        }
+        if (MPI_Finalize() != MPI_SUCCESS) 
+        {
+            throw std::runtime_error("MPI_Finalize failed");
+        }
+        mpi_initialized = false;
         return verified ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
+        if (mpi_initialized) {
+            MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+        }
+
         return 1;
     }
+    return 0;
 }

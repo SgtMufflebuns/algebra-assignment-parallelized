@@ -6,4 +6,5 @@ target_compile_definitions(algebra_determinants PRIVATE
 target_link_libraries(algebra_determinants PRIVATE
     algebra::finite_fields
     algebra::matrices
+    MPI::MPI_CXX
 )
