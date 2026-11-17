@@ -60,41 +60,17 @@ void populate(Matrix& a, Matrix& b) {
     }
 }
 
-int calculateOwner(int globalColumn, int matrixSize, int numNodes)
+int calculateOwner(int globalColumn, int numNodes)
 {
     // calculate the owner of a specific column,
-    // in this instance, for the 1D column blocking
+    // in this instance, for the 1D column cyclic,
+    // is easily done with modulo operations
 
-    int baseBlockSize = matrixSize / numNodes;
-    int remainder = matrixSize % numNodes;
-    int blockStart = 0;
-
-    for (int node = 0; node < numNodes; ++node) 
-    {
-        int blockSize = baseBlockSize + (node < remainder ? 1 : 0);
-        if (globalColumn < blockStart + blockSize) 
-        {
-            return node;
-        }
-        blockStart += blockSize;
-    }
-    return numNodes - 1;
-}
-
-void calculateBounds(int& start, int& end, int matrixSize, int numNodes, int node) {
-    // say you have a 10x10 matrix and 3 nodes
-    // the block size is 3, and the remainder is 1
-    // node 0 gets 4 columns (node 0 < remainder 1), 
-    // meanining that node 1 and 2 get 3 cols each
-
-    int baseBlockSize = matrixSize / numNodes;
-    int remainder = matrixSize % numNodes;
-    start = node * baseBlockSize + std::min(node, remainder);
-    end = start + baseBlockSize + (node < remainder ? 1 : 0);
+    return globalColumn % numNodes;
 }
 
 template<class Element>
-void broadcastFiniteFieldElement(Element& element, int root, MPI_Comm commWorld) 
+void broadcastFiniteFieldElement(Element& element, int owner, MPI_Comm commWorld) 
 {
     // Definitely the trickiest part here; problem is that
     // element can't cleanly be broadcast as a single MPI datatype.
@@ -116,7 +92,7 @@ void broadcastFiniteFieldElement(Element& element, int root, MPI_Comm commWorld)
     //to be stored in for the network...
     std::array<std::uint32_t, numDegrees> coefficientBuffer{};
 
-    if (rank == root) {
+    if (rank == owner) {
         for (std::size_t i = 0; i < numDegrees; ++i) {
             coefficientBuffer[i] = element.coefficient(i).representative();
         }
@@ -127,12 +103,12 @@ void broadcastFiniteFieldElement(Element& element, int root, MPI_Comm commWorld)
         coefficientBuffer.data(),
         static_cast<int>(numDegrees),
         MPI_UINT32_T,
-        root,
+        owner,
         commWorld
     );
 
     //...and reconstruct the element using the buffer.
-    if (rank != root) 
+    if (rank != owner) 
     {
         // construct a temp polynomial to replace the new element. 
         Polynomial tempPolynomial;
@@ -148,34 +124,28 @@ void broadcastFiniteFieldElement(Element& element, int root, MPI_Comm commWorld)
 
 Element determinant(Matrix matrix, MPI_Comm commWorld) {
 
-    // we will be parallelizing this using 1D-column blocked;
-    // that is, evenly distributing the # of cols between
-    // each node using OpenMPI.
-    // this is inefficient (since early nodes will eventually idle), but
-    // this is done to demonstrate the naive approach. 
+    // we will be parallelizing this using 1D-column cyclic, 
+    // which is more efficient compared to the blocked implementation.
 
     int rank, size;
     MPI_Comm_rank(commWorld, &rank);
     MPI_Comm_size(commWorld, &size);
 
-    int localStart, localEnd;
-    calculateBounds(localStart, localEnd, dimension, size, rank);
-
-    // with column-blocked distribution, each node will
-    // own a contiguous block of columns.
+    // with 1D-column cyclic, the owner of a column alternates
+    // between each node to help with load balancing.
 
     /* ex: 2 nodes, 4x4 matrix 
 
-        0 0 1 1
-        0 0 1 1
-        0 0 1 1
-        0 0 1 1
+        0 1 0 1
+        0 1 0 1
+        0 1 0 1
+        0 1 0 1 
     */
 
     Element result = Element::one();
     for (std::size_t activeColumn = 0; activeColumn < dimension; ++activeColumn) {
         std::size_t pivot_row = -1;
-        std::size_t owner = calculateOwner(activeColumn, dimension, size);
+        std::size_t owner = calculateOwner(activeColumn, dimension);
 
         // owner of the column handle the pivot row
         if(rank == owner)
@@ -246,7 +216,7 @@ Element determinant(Matrix matrix, MPI_Comm commWorld) {
         // multiplying ONLY the columns assigned to them.
         // this means each node only has to deal with 1/n of this work
         // hopefully, this offsets the costs of MPI
-        for (std::size_t targetCol = localStart; targetCol < localEnd; ++targetCol) 
+        for (std::size_t targetCol = rank; targetCol < dimension; targetCol += size) 
         {
             if (targetCol <= activeColumn) 
             {
