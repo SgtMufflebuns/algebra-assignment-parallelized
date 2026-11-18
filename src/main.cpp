@@ -145,7 +145,7 @@ Element determinant(Matrix matrix, MPI_Comm commWorld) {
     Element result = Element::one();
     for (std::size_t activeColumn = 0; activeColumn < dimension; ++activeColumn) {
         std::size_t pivot_row = -1;
-        std::size_t owner = calculateOwner(activeColumn, dimension);
+        std::size_t owner = calculateOwner(activeColumn, size);
 
         // owner of the column handle the pivot row
         if(rank == owner)
