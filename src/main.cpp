@@ -122,6 +122,66 @@ void broadcastFiniteFieldElement(Element& element, int owner, MPI_Comm commWorld
     }
 }
 
+void broadcastFiniteFieldMultipliers(std::vector<Element>& multipliers, int owner, MPI_Comm commWorld)
+{
+    // Implementation for broadcasting multipliers en masse
+    
+    // need this in order to extract the # of degrees
+    using Field = typename Element::parent_type;
+
+    // these are the actual values of the element
+    using Coefficient = typename Element::coefficient_type;
+    using Polynomial = typename Element::polynomial_type;
+
+    int rank;
+    MPI_Comm_rank(commWorld, &rank);
+
+    constexpr std::size_t numDegrees = Field::extension_degree;
+    
+    // create a larger buffer to store the coefficients
+    // for every single multiplier element to batch
+    // send in one go
+    std::vector<std::uint32_t> allCoefficientsBuffer(multipliers.size() * numDegrees, 0);
+    
+    if(rank == owner)
+    {
+        for(std::size_t i = 0; i < multipliers.size(); ++i)
+        {
+            for(std::size_t j = 0; j < numDegrees; ++j)
+            {
+                allCoefficientsBuffer[i * numDegrees + j] = multipliers[i].coefficient(j).representative();
+            }
+        }
+    }
+
+    //broadcast this buffer to all nodes...
+    MPI_Bcast(
+        allCoefficientsBuffer.data(),
+        static_cast<int>(multipliers.size() * numDegrees),
+        MPI_UINT32_T,
+        owner,
+        commWorld
+    );
+
+    //...and reconstruct the multipliers using the buffer.
+    if(rank != owner)
+    {
+        for(std::size_t i = 0; i < multipliers.size(); ++i)
+        {
+            // construct a temp polynomial to replace the new element. 
+            Polynomial tempPolynomial;
+            // since polynomials are dynamic, can increase size with no issue.
+            for(std::size_t j = 0; j < numDegrees; ++j)
+            {
+                // now need to skip over the coefficients of the previous multipliers, so we get the right corresponding one
+                tempPolynomial.set_coefficient(j, Coefficient::from_index(allCoefficientsBuffer[i * numDegrees + j]));
+            }
+            multipliers[i] = Element::from_polynomial(tempPolynomial);
+        }
+    }
+
+}
+
 Element determinant(Matrix matrix, MPI_Comm commWorld) {
 
     // we will be parallelizing this using 1D-column cyclic, 
@@ -205,10 +265,7 @@ Element determinant(Matrix matrix, MPI_Comm commWorld) {
         // need to broadcast it to all nodes by reconstructing
         // each finite field element and rebuilding piecemeal
         broadcastFiniteFieldElement(pivot, owner, commWorld);
-        for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow) 
-        {
-            broadcastFiniteFieldElement(multipliers[targetRow - activeColumn - 1], owner, commWorld);
-        }
+        broadcastFiniteFieldMultipliers(multipliers, owner, commWorld);
 
         result = result.multiply(pivot);
 
