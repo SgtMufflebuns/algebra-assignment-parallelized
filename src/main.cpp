@@ -273,20 +273,18 @@ Element determinant(Matrix matrix, MPI_Comm commWorld) {
         // multiplying ONLY the columns assigned to them.
         // this means each node only has to deal with 1/n of this work
         // hopefully, this offsets the costs of MPI
-        for (std::size_t targetCol = rank; targetCol < dimension; targetCol += size) 
+        for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow)
         {
-            if (targetCol <= activeColumn) 
+            const Element& multiplier = multipliers[targetRow - activeColumn - 1];
+
+            if (multiplier.is_zero())
             {
                 continue;
             }
 
-            // remember that we're making an upper triangular matrix, 
-            // so we only need to worry about the elements above the diagonal
-            for (std::size_t targetRow = activeColumn + 1; targetRow < dimension; ++targetRow) 
+            for (std::size_t targetCol = rank; targetCol < dimension; targetCol += size)
             {
-                const Element multiplier = multipliers[targetRow - activeColumn - 1];
-
-                if (multipliers[targetRow - activeColumn - 1].is_zero()) 
+                if (targetCol <= activeColumn)
                 {
                     continue;
                 }

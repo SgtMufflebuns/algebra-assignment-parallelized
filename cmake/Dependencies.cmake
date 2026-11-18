@@ -4,7 +4,7 @@ if(NOT TARGET algebra::finite_fields)
     FetchContent_Declare(
         algebra_finite_fields
         GIT_REPOSITORY git@github.com:CalvinWu2020/algebra-finite-fields-group-1.git
-        GIT_TAG 74b3d569fb48818f4c10f3c32889f2128485f1a7
+        GIT_TAG 4cf1e522f3774a2820b16b0a38a4f07cfe12686e
     )
     FetchContent_MakeAvailable(algebra_finite_fields)
 endif()
