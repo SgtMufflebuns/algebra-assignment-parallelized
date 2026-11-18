@@ -73,6 +73,23 @@ void serialize(
     }
 }
 
+void deserialize(
+    std::vector<uint32_t> coeffs,
+    Element &element
+){
+    std::vector<algebra::PrimeFieldElement<11>> pCoeffs; 
+    algebra::PrimeFieldElement<11> pFieldE {}; 
+
+    for(std::uint32_t coeff : coeffs){
+
+        algebra::PrimeFieldElement<11> pElement = pFieldE.from_integer(coeff); 
+        pCoeffs.push_back(pElement);
+    }
+
+    algebra::Polynomial<algebra::PrimeFieldElement<11>> polynomial = algebra::Polynomial(pCoeffs);
+    element = element.from_polynomial(polynomial);  
+}
+
 void cyclicBlockDistribution(
     std::size_t blockSize, 
     int(&coords) [2], 
@@ -107,7 +124,7 @@ void cyclicBlockDistribution(
 }
 
 //Function name could possibly change if we introduce PLU Decomposition. 
-void cyclicDecompositionDistribution(Matrix matrix, int size){
+void cyclicDecompositionDistribution(Matrix& matrix, int rank, int size){
     //Implement cyclic decomposition using rank
 
     //Here is where we will use the information of rank and size to help compute determinant
@@ -160,33 +177,69 @@ void cyclicDecompositionDistribution(Matrix matrix, int size){
         std::size_t rowEnd = std::min((blockRow + 1) * blockSize, dimension);
         std::size_t colEnd = std::min((blockCol + 1) * blockSize, dimension);
 
-        int position = 0;
-        std::size_t messageSize = sizeof(std::uint32_t) * 3 * blockSize * blockSize;
-        char buff[messageSize];
-
-        //Loops through each element in the block
-        for(std::size_t i = blockRow * blockSize; i < rowEnd; ++i){
-            for(std::size_t j = blockCol * blockSize; j < colEnd;  ++j){
-                //Pass in an element at a time first.
-                std::vector<std::uint32_t> coeffs; 
-                
-                //Serialize the element before passing
-                serialize(matrix(i, j), coeffs);
-
-                MPI_Pack(&coeffs, 3, MPI_INT, buff, messageSize, &position, cart_comm);
-            }
-        }
-        
         int processCartRank;
         int processCoords[2]{};
         processCoords[0] = processRowCoordinate;
         processCoords[1] = processColCoordinate; 
 
         MPI_Cart_rank(cart_comm, processCoords, &processCartRank);
+        
+        std::size_t messageSize = sizeof(std::uint32_t) * 3 * blockSize * blockSize;
+        std::vector<char> buff(messageSize);
 
-        //If the rank is yourself then dont send the data. 
-        if(processCartRank == 0){
-            MPI_Send(buff, position, MPI_PACKED, processCartRank, 0, cart_comm);
+        //If the rank is yourself then send the data. 
+        if(cartRank == 0){
+            int position = 0;
+    
+            //Loops through each element in the block
+            for(std::size_t i = blockRow * blockSize; i < rowEnd; ++i){
+                for(std::size_t j = blockCol * blockSize; j < colEnd;  ++j){
+                    //Pass in an element at a time first.
+                    std::vector<std::uint32_t> coeffs; 
+                    
+                    //Serialize the element before passing
+                    serialize(matrix(i, j), coeffs);
+    
+                    MPI_Pack(coeffs.data(), 3, MPI_UINT32_T, buff.data(), messageSize, &position, cart_comm);
+                }
+            }
+            
+            if(processCartRank != 0){
+                MPI_Send(buff.data(), position, MPI_PACKED, processCartRank, 0, cart_comm);
+            }
+
+        }
+
+        else if(cartRank > 0){
+            
+            MPI_Status status;
+
+            //Receive
+            MPI_Recv(buff.data(), static_cast<int>(buff.size()), MPI_PACKED, 0, 0, cart_comm, &status);
+
+            int receivedSize;
+
+            MPI_Get_count(&status, MPI_PACKED, &receivedSize);
+
+            std::cout << "received size " << receivedSize << " "; 
+
+            std::vector<std::uint32_t> coeffs;
+
+            //De-Serialize
+            Element element;
+
+            deserialize(coeffs, element);
+
+            if(processRowCoordinate == coords[0] && processColCoordinate == coords[1]){
+
+                for(std::size_t globalRow = blockRow * blockSize; globalRow < rowEnd; ++globalRow){
+                    for(std::size_t globalCol = blockCol * blockSize; globalCol < colEnd; ++globalCol){
+                        
+                    }
+                }
+
+            }
+
         }
 
         /* if(processRowCoordinate == coords[0] && processColCoordinate == coords[1]){
@@ -289,8 +342,15 @@ int main() {
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+        //Distribute matrix if you're the host node.
         if(rank == 0){
-            cyclicDecompositionDistribution(a, size);
+            cyclicDecompositionDistribution(a, rank, size);
+        }
+
+        //If you are not the host node then fill up your own partial matrix
+        else{
+            Matrix partialMatrix; 
+            cyclicDecompositionDistribution(partialMatrix, rank, size);
         }
 
         std::cout << "Computing det(A)\n" << std::flush;
