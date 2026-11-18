@@ -40,8 +40,8 @@ if type module >/dev/null 2>&1; then
     module avail 2>&1 | grep -io '[^ ]*mpi[^ ]*' | sort -u | sed 's/^/  /'
 fi
 
-section "Build tools (need CMake >= 3.24, a C++20 compiler, git >= 2.31)"
-for tool in cmake c++ git; do
+section "Build tools (slurm/build.sh needs mpicxx, a C++20 compiler such as GCC 10+, and git; CMake is not used)"
+for tool in mpicxx c++ git cmake; do
     if command -v "$tool" >/dev/null 2>&1; then
         echo "$tool: $("$tool" --version 2>&1 | head -1)"
     else

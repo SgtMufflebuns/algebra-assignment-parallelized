@@ -7,7 +7,7 @@ every branch builds the same `build-<size>/src/algebra_determinants` program.
 | Script | What it does |
 |---|---|
 | `slurm/check_cluster.sh` | Shows partitions, node sizes, MPI version and build tools. Changes nothing. |
-| `slurm/build.sh SIZE...` | Builds one program per matrix size, into `build-<size>/` |
+| `slurm/build.sh SIZE...` | Builds one program per matrix size, into `build-<size>/` (no CMake needed) |
 | `slurm/submit.sh` | Submits one run. Output goes to `results/` |
 | `slurm/sweep.sh` | Submits every combination of sizes and node counts |
 | `slurm/collect.sh` | Turns all `results/*.out` files into one CSV |
@@ -46,6 +46,25 @@ is newer than the build.
 
 To compare two branches, clone the repo twice into two folders, so their builds
 and results stay separate.
+
+**Why this doesn't use CMake:** the project needs CMake 3.24 or newer, and our
+cluster has 3.22. The algebra libraries are header-only, so `build.sh` builds
+the same program directly:
+
+1. it reads `cmake/Dependencies.cmake` and downloads the same library versions
+   CMake would use into `build-deps/` (once; later builds reuse them)
+2. it compiles `src/main.cpp` with `mpicxx`, using CMake's Release settings
+   (`-O3 -DNDEBUG -std=gnu++20`)
+
+The result is the same program, with the same library versions and settings, as
+the README's CMake build. Those CMake commands still work anywhere CMake 3.24+
+is installed. In the report, say that cluster builds were compiled directly with
+`mpicxx` using the same settings and library versions as the CMake build.
+
+**Keep it in sync:** `build.sh` mirrors today's CMake build. If `CMakeLists.txt`
+gains more source files or settings, or a library starts shipping `.cpp` files
+(for example, a cached field that isn't header-only), update `build.sh` to match,
+or build those runs with CMake 3.24+.
 
 ## 3. Quick test across two machines
 
@@ -153,6 +172,8 @@ On a laptop, asking for more ranks than you have cores needs
 | Problem | Fix |
 |---|---|
 | `build-N is not built` | `slurm/build.sh N` |
+| `CMake 3.24 or higher is required` | You ran the README's CMake commands. On the cluster, use `slurm/build.sh N` instead (see section 2) |
+| `mpicxx not found` | Same fix as `mpirun not found` below; both come with MPI |
 | `mpirun not found` | `export MPI_MODULE=<name>` (see `module avail`), then submit again |
 | Job stays `PD` | Ask for fewer nodes than the partition has (`check_cluster.sh` shows the count), or wait |
 | Job ends with `DUE TO TIME LIMIT` | Submit again with a larger `--time` |
